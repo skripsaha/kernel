@@ -567,12 +567,45 @@ void tagfs_init(void) {
                 kprintf("[TAGFS] Valid superblock found on disk (version %u)\n",
                         global_tagfs.superblock->version);
 
-                // Загружаем таблицу inodes
-                if (tagfs_load_inode_table() == 0) {
-                    kprintf("[TAGFS] Successfully loaded filesystem from disk!\n");
-                    loaded_from_disk = 1;
+                // CRITICAL: Validate superblock values BEFORE loading inode table
+                // to prevent out-of-bounds access during loading!
+                int superblock_valid = 1;
+
+                if (global_tagfs.superblock->inode_table_block >= tagfs_storage_blocks) {
+                    kprintf("[TAGFS] ERROR: Invalid inode_table_block (%lu >= %lu)\n",
+                            global_tagfs.superblock->inode_table_block, tagfs_storage_blocks);
+                    superblock_valid = 0;
+                }
+
+                if (global_tagfs.superblock->tag_index_block > tagfs_storage_blocks) {
+                    kprintf("[TAGFS] ERROR: Invalid tag_index_block (%lu > %lu)\n",
+                            global_tagfs.superblock->tag_index_block, tagfs_storage_blocks);
+                    superblock_valid = 0;
+                }
+
+                if (global_tagfs.superblock->data_blocks_start > tagfs_storage_blocks) {
+                    kprintf("[TAGFS] ERROR: Invalid data_blocks_start (%lu > %lu)\n",
+                            global_tagfs.superblock->data_blocks_start, tagfs_storage_blocks);
+                    superblock_valid = 0;
+                }
+
+                if (global_tagfs.superblock->total_blocks > tagfs_storage_blocks) {
+                    kprintf("[TAGFS] ERROR: Invalid total_blocks (%lu > %lu)\n",
+                            global_tagfs.superblock->total_blocks, tagfs_storage_blocks);
+                    superblock_valid = 0;
+                }
+
+                // Only attempt to load if superblock values are valid
+                if (superblock_valid) {
+                    // Загружаем таблицу inodes
+                    if (tagfs_load_inode_table() == 0) {
+                        kprintf("[TAGFS] Successfully loaded filesystem from disk!\n");
+                        loaded_from_disk = 1;
+                    } else {
+                        kprintf("[TAGFS] Failed to load inode table from disk\n");
+                    }
                 } else {
-                    kprintf("[TAGFS] Failed to load inode table from disk\n");
+                    kprintf("[TAGFS] Superblock validation failed, will reformat\n");
                 }
             } else {
                 kprintf("[TAGFS] No valid filesystem on disk (magic=0x%lx)\n",
@@ -628,7 +661,7 @@ void tagfs_init(void) {
     if (global_tagfs.superblock->total_inodes > max_possible_inodes) {
         kprintf("[TAGFS] ERROR: Invalid total_inodes (%lu > max %lu), reformatting...\n",
                 global_tagfs.superblock->total_inodes, max_possible_inodes);
-        tagfs_format(TAGFS_MEM_BLOCKS);
+        tagfs_format(tagfs_storage_blocks);
     }
 
     // Setup inode table (starts at block 1)
@@ -682,8 +715,11 @@ void tagfs_init(void) {
 void tagfs_format(uint64_t total_blocks) {
     kprintf("[TAGFS] Formatting filesystem with %lu blocks...\n", total_blocks);
 
-    // Clear storage
-    memset(tagfs_storage, 0, sizeof(tagfs_storage));
+    // Clear storage (all blocks are already zeroed by pmm_alloc_zero, but clear first few critical blocks)
+    // Note: tagfs_storage is a pointer array, not a static array anymore
+    for (uint64_t i = 0; i < total_blocks && i < tagfs_storage_blocks; i++) {
+        memset(tagfs_storage[i], 0, TAGFS_BLOCK_SIZE);
+    }
 
     // Initialize superblock
     TagFSSuperblock* sb = (TagFSSuperblock*)tagfs_storage[0];
