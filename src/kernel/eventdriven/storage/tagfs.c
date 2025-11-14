@@ -21,46 +21,61 @@ static int use_disk = 0;  // 0 = память, 1 = диск
 
 // Выделить память для TagFS storage на основе доступной RAM
 static int tagfs_allocate_storage(size_t num_blocks) {
+    extern void* pmm_alloc_zero(size_t pages);
+
     kprintf("[TAGFS] Allocating storage for %lu blocks (%lu MB)...\n",
             num_blocks, (num_blocks * TAGFS_BLOCK_SIZE) / (1024 * 1024));
 
-    // Выделяем массив указателей на блоки
-    tagfs_storage = (uint8_t**)kmalloc(num_blocks * sizeof(uint8_t*));
+    // Выделяем массив указателей на блоки через kmalloc (небольшой размер)
+    size_t pointer_array_size = num_blocks * sizeof(uint8_t*);
+    kprintf("[TAGFS] Allocating pointer array: %lu bytes\n", pointer_array_size);
+
+    tagfs_storage = (uint8_t**)kmalloc(pointer_array_size);
     if (!tagfs_storage) {
         kprintf("[TAGFS] ERROR: Failed to allocate block pointer array\n");
         return -1;
     }
 
-    // Выделяем каждый блок отдельно
+    // Выделяем блоки через PMM напрямую (большие размеры!)
+    // Группируем блоки для эффективности: выделяем сразу по несколько страниц
+    kprintf("[TAGFS] Allocating %lu blocks via PMM...\n", num_blocks);
+
     for (size_t i = 0; i < num_blocks; i++) {
-        tagfs_storage[i] = (uint8_t*)kmalloc(TAGFS_BLOCK_SIZE);
+        // Каждый блок = 4096 байт = 1 страница PMM
+        tagfs_storage[i] = (uint8_t*)pmm_alloc_zero(1);
         if (!tagfs_storage[i]) {
-            kprintf("[TAGFS] ERROR: Failed to allocate block %lu\n", i);
+            kprintf("[TAGFS] ERROR: PMM failed to allocate block %lu\n", i);
             // Освобождаем уже выделенные блоки
             for (size_t j = 0; j < i; j++) {
-                kfree(tagfs_storage[j]);
+                extern void pmm_free(void* addr, size_t pages);
+                pmm_free(tagfs_storage[j], 1);
             }
             kfree(tagfs_storage);
             tagfs_storage = NULL;
             return -1;
         }
-        // Очищаем блок
-        memset(tagfs_storage[i], 0, TAGFS_BLOCK_SIZE);
+
+        // pmm_alloc_zero уже обнуляет память, но на всякий случай
+        // (memset не нужен!)
     }
 
     tagfs_storage_blocks = num_blocks;
-    kprintf("[TAGFS] Storage allocated: %lu blocks\n", tagfs_storage_blocks);
+    kprintf("[TAGFS] Storage allocated successfully: %lu blocks via PMM\n", tagfs_storage_blocks);
     return 0;
 }
 
 // Освободить память TagFS storage
 static void tagfs_free_storage(void) {
+    extern void pmm_free(void* addr, size_t pages);
+
     if (tagfs_storage) {
+        // Освобождаем блоки через PMM
         for (size_t i = 0; i < tagfs_storage_blocks; i++) {
             if (tagfs_storage[i]) {
-                kfree(tagfs_storage[i]);
+                pmm_free(tagfs_storage[i], 1);
             }
         }
+        // Освобождаем массив указателей через kmalloc
         kfree(tagfs_storage);
         tagfs_storage = NULL;
         tagfs_storage_blocks = 0;
