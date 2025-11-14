@@ -8,12 +8,64 @@
 
 TagFSContext global_tagfs;
 
-// Простое хранилище блоков в памяти (fallback если диск недоступен)
-#define TAGFS_MEM_BLOCKS 128  // 512MB виртуального диска (128 * 4KB)
-static uint8_t tagfs_storage[TAGFS_MEM_BLOCKS][TAGFS_BLOCK_SIZE];
+// Динамическое хранилище блоков в памяти
+static uint8_t** tagfs_storage = NULL;  // Динамический массив указателей на блоки
+static size_t tagfs_storage_blocks = 0;  // Реальное количество блоков
 
 // Использовать реальный диск или память?
 static int use_disk = 0;  // 0 = память, 1 = диск
+
+// ============================================================================
+// DYNAMIC STORAGE ALLOCATION
+// ============================================================================
+
+// Выделить память для TagFS storage на основе доступной RAM
+static int tagfs_allocate_storage(size_t num_blocks) {
+    kprintf("[TAGFS] Allocating storage for %lu blocks (%lu MB)...\n",
+            num_blocks, (num_blocks * TAGFS_BLOCK_SIZE) / (1024 * 1024));
+
+    // Выделяем массив указателей на блоки
+    tagfs_storage = (uint8_t**)kmalloc(num_blocks * sizeof(uint8_t*));
+    if (!tagfs_storage) {
+        kprintf("[TAGFS] ERROR: Failed to allocate block pointer array\n");
+        return -1;
+    }
+
+    // Выделяем каждый блок отдельно
+    for (size_t i = 0; i < num_blocks; i++) {
+        tagfs_storage[i] = (uint8_t*)kmalloc(TAGFS_BLOCK_SIZE);
+        if (!tagfs_storage[i]) {
+            kprintf("[TAGFS] ERROR: Failed to allocate block %lu\n", i);
+            // Освобождаем уже выделенные блоки
+            for (size_t j = 0; j < i; j++) {
+                kfree(tagfs_storage[j]);
+            }
+            kfree(tagfs_storage);
+            tagfs_storage = NULL;
+            return -1;
+        }
+        // Очищаем блок
+        memset(tagfs_storage[i], 0, TAGFS_BLOCK_SIZE);
+    }
+
+    tagfs_storage_blocks = num_blocks;
+    kprintf("[TAGFS] Storage allocated: %lu blocks\n", tagfs_storage_blocks);
+    return 0;
+}
+
+// Освободить память TagFS storage
+static void tagfs_free_storage(void) {
+    if (tagfs_storage) {
+        for (size_t i = 0; i < tagfs_storage_blocks; i++) {
+            if (tagfs_storage[i]) {
+                kfree(tagfs_storage[i]);
+            }
+        }
+        kfree(tagfs_storage);
+        tagfs_storage = NULL;
+        tagfs_storage_blocks = 0;
+    }
+}
 
 // ============================================================================
 // HELPER FUNCTIONS - Работа с битмапами
@@ -47,8 +99,9 @@ static uint64_t bitmap_find_free(uint8_t* bitmap, uint64_t max_bits) {
 
 // Читать блок из диска или памяти
 static int tagfs_read_block_raw(uint64_t block_num, uint8_t* buffer) {
-    if (block_num >= TAGFS_MEM_BLOCKS) {
-        kprintf("[TAGFS] ERROR: Block %lu out of bounds\n", block_num);
+    if (block_num >= tagfs_storage_blocks) {
+        kprintf("[TAGFS] ERROR: Block %lu out of bounds (max %lu)\n",
+                block_num, tagfs_storage_blocks);
         return -1;
     }
 
@@ -57,6 +110,10 @@ static int tagfs_read_block_raw(uint64_t block_num, uint8_t* buffer) {
         return ata_read_block(block_num, buffer);
     } else {
         // Копируем из памяти
+        if (!tagfs_storage || !tagfs_storage[block_num]) {
+            kprintf("[TAGFS] ERROR: Block %lu not allocated\n", block_num);
+            return -1;
+        }
         memcpy(buffer, tagfs_storage[block_num], TAGFS_BLOCK_SIZE);
         return 0;
     }
@@ -64,8 +121,9 @@ static int tagfs_read_block_raw(uint64_t block_num, uint8_t* buffer) {
 
 // Записать блок на диск или в память
 static int tagfs_write_block_raw(uint64_t block_num, const uint8_t* buffer) {
-    if (block_num >= TAGFS_MEM_BLOCKS) {
-        kprintf("[TAGFS] ERROR: Block %lu out of bounds\n", block_num);
+    if (block_num >= tagfs_storage_blocks) {
+        kprintf("[TAGFS] ERROR: Block %lu out of bounds (max %lu)\n",
+                block_num, tagfs_storage_blocks);
         return -1;
     }
 
@@ -74,6 +132,10 @@ static int tagfs_write_block_raw(uint64_t block_num, const uint8_t* buffer) {
         return ata_write_block(block_num, buffer);
     } else {
         // Копируем в память
+        if (!tagfs_storage || !tagfs_storage[block_num]) {
+            kprintf("[TAGFS] ERROR: Block %lu not allocated\n", block_num);
+            return -1;
+        }
         memcpy(tagfs_storage[block_num], buffer, TAGFS_BLOCK_SIZE);
         return 0;
     }
@@ -214,9 +276,9 @@ static uint64_t tagfs_alloc_block(void) {
     uint64_t block = bitmap_find_free(global_tagfs.block_bitmap, global_tagfs.superblock->total_blocks);
     if (block != (uint64_t)-1) {
         // Bounds check to prevent out-of-bounds access
-        if (block >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Block allocation out of bounds (%lu >= %u)\n",
-                    block, TAGFS_MEM_BLOCKS);
+        if (block >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Block allocation out of bounds (%lu >= %lu)\n",
+                    block, tagfs_storage_blocks);
             return (uint64_t)-1;
         }
 
@@ -224,18 +286,20 @@ static uint64_t tagfs_alloc_block(void) {
         global_tagfs.superblock->free_blocks--;
 
         // Очищаем блок
-        memset(tagfs_storage[block], 0, TAGFS_BLOCK_SIZE);
+        if (tagfs_storage && tagfs_storage[block]) {
+            memset(tagfs_storage[block], 0, TAGFS_BLOCK_SIZE);
+        }
     }
     return block;
 }
 
 static void tagfs_free_block(uint64_t block) {
-    if (block < global_tagfs.superblock->total_blocks && block < TAGFS_MEM_BLOCKS) {
+    if (block < global_tagfs.superblock->total_blocks && block < tagfs_storage_blocks) {
         bitmap_clear_bit(global_tagfs.block_bitmap, block);
         global_tagfs.superblock->free_blocks++;
-    } else if (block >= TAGFS_MEM_BLOCKS) {
-        kprintf("[TAGFS] ERROR: Attempt to free invalid block %lu (>= %u)\n",
-                block, TAGFS_MEM_BLOCKS);
+    } else if (block >= tagfs_storage_blocks) {
+        kprintf("[TAGFS] ERROR: Attempt to free invalid block %lu (>= %lu)\n",
+                block, tagfs_storage_blocks);
     }
 }
 
@@ -263,8 +327,9 @@ static uint64_t tagfs_get_block_by_index(FileInode* inode, uint64_t block_idx) {
         }
 
         // Проверка bounds
-        if (inode->indirect_block >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid indirect_block %lu\n", inode->indirect_block);
+        if (inode->indirect_block >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid indirect_block %lu (>= %lu)\n",
+                    inode->indirect_block, tagfs_storage_blocks);
             return 0;
         }
 
@@ -282,8 +347,9 @@ static uint64_t tagfs_get_block_by_index(FileInode* inode, uint64_t block_idx) {
         }
 
         // Проверка bounds
-        if (inode->double_indirect_block >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid double_indirect_block %lu\n", inode->double_indirect_block);
+        if (inode->double_indirect_block >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid double_indirect_block %lu (>= %lu)\n",
+                    inode->double_indirect_block, tagfs_storage_blocks);
             return 0;
         }
 
@@ -298,8 +364,9 @@ static uint64_t tagfs_get_block_by_index(FileInode* inode, uint64_t block_idx) {
             return 0;  // Level2 block не выделен
         }
 
-        if (level2_block >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid level2_block %lu\n", level2_block);
+        if (level2_block >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid level2_block %lu (>= %lu)\n",
+                    level2_block, tagfs_storage_blocks);
             return 0;
         }
 
@@ -335,8 +402,9 @@ static uint64_t tagfs_alloc_block_by_index(FileInode* inode, uint64_t block_idx)
             }
         }
 
-        if (inode->indirect_block >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid indirect_block %lu\n", inode->indirect_block);
+        if (inode->indirect_block >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid indirect_block %lu (>= %lu)\n",
+                    inode->indirect_block, tagfs_storage_blocks);
             return (uint64_t)-1;
         }
 
@@ -362,8 +430,9 @@ static uint64_t tagfs_alloc_block_by_index(FileInode* inode, uint64_t block_idx)
             }
         }
 
-        if (inode->double_indirect_block >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid double_indirect_block %lu\n", inode->double_indirect_block);
+        if (inode->double_indirect_block >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid double_indirect_block %lu (>= %lu)\n",
+                    inode->double_indirect_block, tagfs_storage_blocks);
             return (uint64_t)-1;
         }
 
@@ -382,8 +451,9 @@ static uint64_t tagfs_alloc_block_by_index(FileInode* inode, uint64_t block_idx)
 
         uint64_t level2_block = level1_table[level1_idx];
 
-        if (level2_block >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid level2_block %lu\n", level2_block);
+        if (level2_block >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid level2_block %lu (>= %lu)\n",
+                    level2_block, tagfs_storage_blocks);
             return (uint64_t)-1;
         }
 
@@ -404,7 +474,7 @@ static uint64_t tagfs_alloc_block_by_index(FileInode* inode, uint64_t block_idx)
 // Освободить все indirect блоки файла
 static void tagfs_free_indirect_blocks(FileInode* inode) {
     // Освобождаем single indirect
-    if (inode->indirect_block != 0 && inode->indirect_block < TAGFS_MEM_BLOCKS) {
+    if (inode->indirect_block != 0 && inode->indirect_block < tagfs_storage_blocks) {
         uint64_t* indirect_table = (uint64_t*)tagfs_storage[inode->indirect_block];
 
         // Освобождаем все data blocks
@@ -420,14 +490,14 @@ static void tagfs_free_indirect_blocks(FileInode* inode) {
     }
 
     // Освобождаем double indirect
-    if (inode->double_indirect_block != 0 && inode->double_indirect_block < TAGFS_MEM_BLOCKS) {
+    if (inode->double_indirect_block != 0 && inode->double_indirect_block < tagfs_storage_blocks) {
         uint64_t* level1_table = (uint64_t*)tagfs_storage[inode->double_indirect_block];
 
         // Проходим по всем level2 блокам
         for (uint32_t i = 0; i < PTRS_PER_BLOCK; i++) {
             uint64_t level2_block = level1_table[i];
 
-            if (level2_block != 0 && level2_block < TAGFS_MEM_BLOCKS) {
+            if (level2_block != 0 && level2_block < tagfs_storage_blocks) {
                 uint64_t* level2_table = (uint64_t*)tagfs_storage[level2_block];
 
                 // Освобождаем все data blocks
@@ -541,9 +611,34 @@ int tagfs_tag_equal(const Tag* a, const Tag* b) {
 // ============================================================================
 
 void tagfs_init(void) {
+    extern size_t pmm_free_pages(void);  // Из pmm.h
+
     kprintf("[TAGFS] Initializing tag-based filesystem...\n");
 
     memset(&global_tagfs, 0, sizeof(TagFSContext));
+
+    // Вычисляем размер TagFS на основе доступной RAM
+    // Выделяем 10% свободной памяти для TagFS (можно настроить)
+    size_t free_pages = pmm_free_pages();
+    size_t free_bytes = free_pages * 4096;  // PMM_PAGE_SIZE = 4096
+    size_t tagfs_bytes = free_bytes / 10;   // 10% от свободной памяти
+    size_t num_blocks = tagfs_bytes / TAGFS_BLOCK_SIZE;
+
+    // Минимум 128 блоков (512 KB), максимум 16384 блоков (64 MB для начала)
+    if (num_blocks < 128) {
+        num_blocks = 128;
+    }
+    if (num_blocks > 16384) {
+        num_blocks = 16384;
+    }
+
+    kprintf("[TAGFS] Available RAM: %lu MB, allocating %lu blocks (%lu MB) for TagFS\n",
+            free_bytes / (1024*1024), num_blocks, (num_blocks * TAGFS_BLOCK_SIZE) / (1024*1024));
+
+    // Выделяем память для хранилища
+    if (tagfs_allocate_storage(num_blocks) != 0) {
+        panic("[TAGFS] FATAL: Failed to allocate storage!");
+    }
 
     // Allocate superblock in memory
     global_tagfs.superblock = (TagFSSuperblock*)tagfs_storage[0];
@@ -586,7 +681,7 @@ void tagfs_init(void) {
     // Если не загрузили с диска, форматируем
     if (!loaded_from_disk) {
         kprintf("[TAGFS] Creating new filesystem...\n");
-        tagfs_format(TAGFS_MEM_BLOCKS);
+        tagfs_format(tagfs_storage_blocks);
 
         // Если диск доступен, записываем новую ФС на диск
         if (disk_available) {
@@ -600,22 +695,22 @@ void tagfs_init(void) {
     }
 
     // Validate superblock values to prevent out-of-bounds access
-    if (global_tagfs.superblock->inode_table_block >= TAGFS_MEM_BLOCKS) {
-        kprintf("[TAGFS] ERROR: Invalid inode_table_block (%lu >= %u), reformatting...\n",
-                global_tagfs.superblock->inode_table_block, TAGFS_MEM_BLOCKS);
-        tagfs_format(TAGFS_MEM_BLOCKS);
+    if (global_tagfs.superblock->inode_table_block >= tagfs_storage_blocks) {
+        kprintf("[TAGFS] ERROR: Invalid inode_table_block (%lu >= %lu), reformatting...\n",
+                global_tagfs.superblock->inode_table_block, tagfs_storage_blocks);
+        tagfs_format(tagfs_storage_blocks);
     }
 
-    if (global_tagfs.superblock->data_blocks_start > TAGFS_MEM_BLOCKS) {
-        kprintf("[TAGFS] ERROR: Invalid data_blocks_start (%lu > %u), reformatting...\n",
-                global_tagfs.superblock->data_blocks_start, TAGFS_MEM_BLOCKS);
-        tagfs_format(TAGFS_MEM_BLOCKS);
+    if (global_tagfs.superblock->data_blocks_start > tagfs_storage_blocks) {
+        kprintf("[TAGFS] ERROR: Invalid data_blocks_start (%lu > %lu), reformatting...\n",
+                global_tagfs.superblock->data_blocks_start, tagfs_storage_blocks);
+        tagfs_format(tagfs_storage_blocks);
     }
 
-    if (global_tagfs.superblock->total_blocks > TAGFS_MEM_BLOCKS) {
-        kprintf("[TAGFS] ERROR: Invalid total_blocks (%lu > %u), reformatting...\n",
-                global_tagfs.superblock->total_blocks, TAGFS_MEM_BLOCKS);
-        tagfs_format(TAGFS_MEM_BLOCKS);
+    if (global_tagfs.superblock->total_blocks > tagfs_storage_blocks) {
+        kprintf("[TAGFS] ERROR: Invalid total_blocks (%lu > %lu), reformatting...\n",
+                global_tagfs.superblock->total_blocks, tagfs_storage_blocks);
+        tagfs_format(tagfs_storage_blocks);
     }
 
     // Validate total_inodes doesn't exceed available space
@@ -750,27 +845,22 @@ uint64_t tagfs_create_file(Tag* tags, uint32_t tag_count) {
         return TAGFS_INVALID_INODE;
     }
 
+    // КРИТИЧНО: весь процесс создания файла теперь под одним lock для thread-safety!
     spin_lock(&global_tagfs.lock);
 
-    // Allocate inode
-    uint64_t inode_id = tagfs_alloc_inode();
-    if (inode_id == TAGFS_INVALID_INODE) {
-        spin_unlock(&global_tagfs.lock);
-        kprintf("[TAGFS] Error: no free inodes\n");
-        return TAGFS_INVALID_INODE;
-    }
-
-    // Find inode slot
     // Safely cap to prevent overflow
     uint32_t safe_max = global_tagfs.superblock->total_inodes;
     if (safe_max > TAGFS_MAX_FILES) {
         safe_max = TAGFS_MAX_FILES;
     }
 
+    // Сначала найдем свободный слот в inode_table
     FileInode* inode = NULL;
+    uint64_t inode_slot_index = 0;
     for (uint32_t i = 0; i < safe_max; i++) {
         if (global_tagfs.inode_table[i].inode_id == 0) {
             inode = &global_tagfs.inode_table[i];
+            inode_slot_index = i;
             break;
         }
     }
@@ -781,7 +871,14 @@ uint64_t tagfs_create_file(Tag* tags, uint32_t tag_count) {
         return TAGFS_INVALID_INODE;
     }
 
-    // Initialize inode
+    // Теперь выделяем inode ID (атомарный инкремент)
+    uint64_t inode_id = atomic_increment_u64(&global_tagfs.next_inode_id);
+
+    // Обновляем bitmap (inode занят)
+    bitmap_set_bit(global_tagfs.inode_bitmap, inode_slot_index);
+    global_tagfs.superblock->free_inodes--;
+
+    // Initialize inode (под lock'ом!)
     memset(inode, 0, sizeof(FileInode));
     inode->inode_id = inode_id;
     inode->size = 0;
@@ -881,9 +978,9 @@ int tagfs_read_file(uint64_t inode_id, uint64_t offset, uint8_t* buffer, uint64_
         }
 
         // Bounds check
-        if (block_num >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid block number %lu in read (>= %u)\n",
-                    block_num, TAGFS_MEM_BLOCKS);
+        if (block_num >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid block number %lu in read (>= %lu)\n",
+                    block_num, tagfs_storage_blocks);
             break;
         }
 
@@ -927,9 +1024,9 @@ int tagfs_write_file(uint64_t inode_id, uint64_t offset, const uint8_t* buffer, 
         }
 
         // Bounds check
-        if (block_num >= TAGFS_MEM_BLOCKS) {
-            kprintf("[TAGFS] ERROR: Invalid block number %lu in write (>= %u)\n",
-                    block_num, TAGFS_MEM_BLOCKS);
+        if (block_num >= tagfs_storage_blocks) {
+            kprintf("[TAGFS] ERROR: Invalid block number %lu in write (>= %lu)\n",
+                    block_num, tagfs_storage_blocks);
             break;
         }
 
@@ -1158,8 +1255,8 @@ void tagfs_index_rebuild(void) {
     uint64_t inode_end_block = global_tagfs.superblock->tag_index_block;
 
     // Bounds check to prevent accessing memory outside tagfs_storage
-    if (inode_end_block > TAGFS_MEM_BLOCKS) {
-        inode_end_block = TAGFS_MEM_BLOCKS;
+    if (inode_end_block > tagfs_storage_blocks) {
+        inode_end_block = tagfs_storage_blocks;
         kprintf("[TAGFS] WARNING: Limiting inode scan to %lu blocks\n", inode_end_block);
     }
 
@@ -1176,14 +1273,12 @@ void tagfs_index_rebuild(void) {
 
     kprintf("[TAGFS] Scanning %lu inodes for index rebuild...\n", inodes_to_scan);
 
-    // Scan all inodes and rebuild
-    uint32_t scanned = 0;
-    for (uint64_t i = 0; i < inodes_to_scan && scanned < 10000; i++) {
+    // Scan all inodes and rebuild (без лимита!)
+    for (uint64_t i = 0; i < inodes_to_scan; i++) {
         FileInode* inode = &global_tagfs.inode_table[i];
         if (inode->inode_id != 0) {
             tagfs_index_add_file(inode->inode_id, inode->tags, inode->tag_count);
         }
-        scanned++;
     }
 
     kprintf("[TAGFS] Index rebuilt: %u unique tags\n", global_tagfs.tag_index.entry_count);
@@ -1553,16 +1648,16 @@ int tagfs_erase_file(uint64_t inode_id) {
 
     spin_lock(&global_tagfs.lock);
 
-    // Освобождаем все блоки данных
+    // Освобождаем все direct блоки данных
     for (int i = 0; i < 12; i++) {
         if (inode->direct_blocks[i] != 0) {
-            bitmap_clear_bit(global_tagfs.block_bitmap, inode->direct_blocks[i]);
-            global_tagfs.superblock->free_blocks++;
+            tagfs_free_block(inode->direct_blocks[i]);
             inode->direct_blocks[i] = 0;
         }
     }
 
-    // TODO: Освободить indirect и double_indirect блоки
+    // Освобождаем indirect и double_indirect блоки (полная реализация!)
+    tagfs_free_indirect_blocks(inode);
 
     // Удаляем из индекса тегов
     tagfs_index_remove_file(inode_id);
