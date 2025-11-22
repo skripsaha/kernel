@@ -411,8 +411,10 @@ void syscall_handler(interrupt_frame_t* frame) {
         kprintf("[SYSCALL] Processed %lu events from EventRing\n", processed);
 
         // Events are now in routing table.
-        // ASYNC: They will be processed by timer IRQ in background!
-        // User can call kernel_notify(WAIT) to block until completion.
+        // SYNCHRONOUS: Process them immediately via Guide!
+        // This ensures events are handled before WAIT is called.
+        extern void guide_process_all(void);
+        guide_process_all();
 
         frame->rax = processed;  // Return number of events processed
         return;
