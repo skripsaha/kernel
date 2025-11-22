@@ -421,31 +421,46 @@ load_kernel_simple:
     jc .use_chs          ; Если не поддерживается, используем CHS
 
     ; Используем INT 13h Extensions (LBA)
-    ; Загружаем 512 секторов (256KB) начиная с LBA 10
+    ; Загружаем 384 сектора (192KB) начиная с LBA 10
+    ; По 64 сектора за раз (безопасное значение для BIOS compatibility)
 
-    ; Часть 1: 127 секторов
+    ; Часть 1: 64 сектора
     mov si, dap1
     mov ah, 0x42
     mov dl, 0x80
     int 0x13
     jc .disk_error
 
-    ; Часть 2: 127 секторов
+    ; Часть 2: 64 сектора
     mov si, dap2
     mov ah, 0x42
     mov dl, 0x80
     int 0x13
     jc .disk_error
 
-    ; Часть 3: 127 секторов
+    ; Часть 3: 64 сектора
     mov si, dap3
     mov ah, 0x42
     mov dl, 0x80
     int 0x13
     jc .disk_error
 
-    ; Часть 4: 131 секторов (remaining: 512 - 127 - 127 - 127 = 131)
+    ; Часть 4: 64 сектора
     mov si, dap4
+    mov ah, 0x42
+    mov dl, 0x80
+    int 0x13
+    jc .disk_error
+
+    ; Часть 5: 64 сектора
+    mov si, dap5
+    mov ah, 0x42
+    mov dl, 0x80
+    int 0x13
+    jc .disk_error
+
+    ; Часть 6: 64 сектора
+    mov si, dap6
     mov ah, 0x42
     mov dl, 0x80
     int 0x13
@@ -771,14 +786,13 @@ gdt_descriptor:
     dd gdt_start                  ; Base address (32-bit в 16-bit режиме)
 
 ; ===== DAP STRUCTURES FOR INT 13h EXTENSIONS (LBA MODE) =====
-; Total: 250 sectors = 125KB
-; Part 1: 127 sectors (max single read) → 0x10000
-; Part 2: 123 sectors (250-127)        → 0x1FE00
+; Total: 384 sectors = 192KB
+; 6 chunks of 64 sectors each (BIOS-safe size)
 align 4
 dap1:
     db 0x10             ; DAP size (16 bytes)
     db 0                ; Reserved
-    dw 127              ; Sector count: 127 (maximum per INT 13h call)
+    dw 64               ; Sector count: 64
     dw 0x0000           ; Offset
     dw 0x1000           ; Segment (0x1000:0x0000 = 0x10000 physical)
     dq 10               ; Starting LBA sector: 10
@@ -787,28 +801,46 @@ align 4
 dap2:
     db 0x10             ; DAP size (16 bytes)
     db 0                ; Reserved
-    dw 127              ; Sector count: 127
+    dw 64               ; Sector count: 64
     dw 0x0000           ; Offset
-    dw 0x1FE0           ; Segment (0x1FE0:0x0000 = 0x1FE00 physical)
-    dq 137              ; Starting LBA sector: 137 (10 + 127)
+    dw 0x1800           ; Segment (0x1800:0x0000 = 0x18000 physical)
+    dq 74               ; Starting LBA sector: 74 (10 + 64)
 
 align 4
 dap3:
     db 0x10             ; DAP size (16 bytes)
     db 0                ; Reserved
-    dw 127              ; Sector count: 127
+    dw 64               ; Sector count: 64
     dw 0x0000           ; Offset
-    dw 0x2FC0           ; Segment (0x2FC0:0x0000 = 0x2FC00 physical)
-    dq 264              ; Starting LBA sector: 264 (10 + 127 + 127)
+    dw 0x2000           ; Segment (0x2000:0x0000 = 0x20000 physical)
+    dq 138              ; Starting LBA sector: 138 (10 + 64 + 64)
 
 align 4
 dap4:
     db 0x10             ; DAP size (16 bytes)
     db 0                ; Reserved
-    dw 131              ; Sector count: 131 (512 - 127 - 127 - 127 = 131)
+    dw 64               ; Sector count: 64
     dw 0x0000           ; Offset
-    dw 0x3FA0           ; Segment (0x3FA0:0x0000 = 0x3FA00 physical)
-    dq 391              ; Starting LBA sector: 391 (10 + 127 + 127 + 127)
+    dw 0x2800           ; Segment (0x2800:0x0000 = 0x28000 physical)
+    dq 202              ; Starting LBA sector: 202 (10 + 64 + 64 + 64)
+
+align 4
+dap5:
+    db 0x10             ; DAP size (16 bytes)
+    db 0                ; Reserved
+    dw 64               ; Sector count: 64
+    dw 0x0000           ; Offset
+    dw 0x3000           ; Segment (0x3000:0x0000 = 0x30000 physical)
+    dq 266              ; Starting LBA sector: 266 (10 + 64*4)
+
+align 4
+dap6:
+    db 0x10             ; DAP size (16 bytes)
+    db 0                ; Reserved
+    dw 64               ; Sector count: 64
+    dw 0x0000           ; Offset
+    dw 0x3800           ; Segment (0x3800:0x0000 = 0x38000 physical)
+    dq 330              ; Starting LBA sector: 330 (10 + 64*5)
 
 ; ===== MESSAGES =====
 msg_stage2_start      db 'BoxKernel Stage2 Started', 13, 10, 0
