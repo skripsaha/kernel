@@ -414,20 +414,15 @@ void workflow_on_event_completed(uint64_t workflow_id, uint64_t event_id,
     if (!workflow) {
         kprintf("[WORKFLOW] WARNING: Event %lu completed but workflow %lu not found\n",
                 event_id, workflow_id);
-        // Cleanup result to prevent leak
-        if (result) {
-            kfree(result);
-        }
+        // NOTE: Do NOT free result here - execution_deck owns it and handles cleanup
         return;
     }
 
     if (!workflow->context) {
         // This is normal for direct events submitted via EventRing (not workflow activation)
         // Workflows can be registered but not activated - events are sent directly
-        // Just cleanup result and return silently
-        if (result) {
-            kfree(result);
-        }
+        // NOTE: Do NOT free result here - ownership is execution_deck's responsibility!
+        // execution_deck will properly cleanup based on result_type (VALUE vs MEMORY_MAPPED)
         return;
     }
 
