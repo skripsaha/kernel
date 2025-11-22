@@ -296,21 +296,26 @@ void scheduler_tick(interrupt_frame_t* frame) {
 
     if (!current) {
         // No current process - check if there are any ready processes
-        if (ready_queue_count > 0) {
-            kprintf("[SCHEDULER] No current process, but %d in ready queue - picking one\n",
-                    ready_queue_count);
-
-            process_t* next = scheduler_pick_next();
-            if (next) {
-                scheduler_restore_context(next, frame);
-                next->state = PROCESS_STATE_RUNNING;
-                process_set_current(next);
-                stats.context_switches++;
-                time_slice_remaining = TIME_SLICE_TICKS;
-                kprintf("[SCHEDULER] Started process PID=%lu from idle\n", next->pid);
-            }
+        // DEFENSIVE: This can happen if timer IRQ fires during system init
+        if (ready_queue_count == 0) {
+            // System not fully initialized - no processes yet
+            return;  // Silently return (this is expected during boot)
         }
-        return;  // No current process to preempt
+
+        // There ARE ready processes - pick one and start it
+        kprintf("[SCHEDULER] No current process, but %d in ready queue - picking one\n",
+                ready_queue_count);
+
+        process_t* next = scheduler_pick_next();
+        if (next) {
+            scheduler_restore_context(next, frame);
+            next->state = PROCESS_STATE_RUNNING;
+            process_set_current(next);
+            stats.context_switches++;
+            time_slice_remaining = TIME_SLICE_TICKS;
+            kprintf("[SCHEDULER] Started process PID=%lu from idle\n", next->pid);
+        }
+        return;  // Done
     }
 
     // Decrement time slice

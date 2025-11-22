@@ -163,12 +163,7 @@ void kernel_main(e820_entry_t* e820_map, uint64_t e820_count, uint64_t mem_start
     cpu_print_detailed_info();
 
     kprintf("\nSystem is ready to process workflows!\n");
-    kprintf("Enabling interrupts...\n\n");
-
-    asm volatile("sti");  // Enable interrupts
-
-    kprintf("Interrupts enabled!\n");
-    kprintf("Kernel is now running...\n\n");
+    kprintf("NOTE: Interrupts will be enabled AFTER process creation\n\n");
 
     // ========================================================================
     // PHASE 7: REGISTER TEST WORKFLOW
@@ -255,6 +250,11 @@ void kernel_main(e820_entry_t* e820_map, uint64_t e820_count, uint64_t mem_start
 
     kprintf("[KERNEL] Starting with PID=%lu\n", first->pid);
     kprintf("[KERNEL] Transitioning to Ring 3 (multi-process mode)...\n\n");
+
+    // CRITICAL: Enable interrupts NOW (processes are created and ready!)
+    kprintf("[KERNEL] Enabling interrupts...\n");
+    asm volatile("sti");
+    kprintf("[KERNEL] Interrupts enabled! Scheduler is active.\n\n");
 
     // Enter user mode - scheduler will switch between processes when they yield!
     process_enter_usermode(first);
