@@ -162,6 +162,11 @@ static int page_fault_printed = 0;
 void exception_handler(interrupt_frame_t* frame) {
     exception_count++;
 
+    // PRODUCTION: Check if exception came from user-space (Ring 3)
+    // CS & 3 gives us the CPL (Current Privilege Level)
+    // If CPL == 3, it's user-space; if CPL == 0, it's kernel-space
+    int from_user_space = (frame->cs & 3) == 3;
+
     // Special handling for page faults - try to handle silently
     if (frame->vector == EXCEPTION_PAGE_FAULT) {
         uint64_t cr2;
@@ -173,21 +178,101 @@ void exception_handler(interrupt_frame_t* frame) {
             return;
         }
 
-        // Failed to handle - print error only once per address
+        // PRODUCTION: User-space page fault - kill process, don't panic kernel!
+        if (from_user_space) {
+            extern process_t* process_get_current(void);
+            process_t* current = process_get_current();
+
+            if (current) {
+                kprintf("\n%[E]=== USER PROCESS CRASH (Page Fault) ===%[D]\n");
+                kprintf("%[E]PID: %lu%[D]\n", current->pid);
+                kprintf("%[E]Faulting Address (CR2): 0x%llx%[D]\n", cr2);
+                kprintf("%[E]Error Code: 0x%llx%[D] ", frame->error_code);
+                kprintf("(P=%d W=%d U=%d R=%d I=%d)\n",
+                        (frame->error_code & 1),      // Present
+                        (frame->error_code >> 1) & 1, // Write
+                        (frame->error_code >> 2) & 1, // User
+                        (frame->error_code >> 3) & 1, // Reserved
+                        (frame->error_code >> 4) & 1  // Instruction fetch
+                );
+                kprintf("%[E]RIP: 0x%llx%[D]\n", frame->rip);
+                kprintf("%[E]RSP: 0x%llx%[D]\n", frame->rsp);
+                kprintf("%[E]Killing process PID=%lu...%[D]\n\n", current->pid);
+
+                // Mark process as zombie and yield to next process
+                current->state = PROCESS_STATE_ZOMBIE;
+                extern void scheduler_yield_cooperative(interrupt_frame_t* frame);
+                scheduler_yield_cooperative(frame);
+
+                // scheduler_yield_cooperative modifies frame to switch to next process
+                // When we return, IRETQ will jump to the new process
+                return;
+            }
+        }
+
+        // Kernel-space page fault (or no current process) - this is CRITICAL!
         if (cr2 != last_page_fault_addr || !page_fault_printed) {
-            kprintf("\n%[E]=== PAGE FAULT (unhandled) ===%[D]\n");
-            kprintf("%[E]Address: 0x%llx%[D]\n", cr2);
+            kprintf("\n%[E]=== KERNEL PAGE FAULT (CRITICAL!) ===%[D]\n");
+            kprintf("%[E]Address (CR2): 0x%llx%[D]\n", cr2);
             kprintf("%[E]Error Code: 0x%llx%[D]\n", frame->error_code);
             kprintf("%[E]RIP: 0x%llx%[D]\n", frame->rip);
             last_page_fault_addr = cr2;
             page_fault_printed = 1;
-            panic("Unhandled page fault");
+            panic("Unhandled kernel page fault");
         }
         return;
     }
 
-    // For other exceptions, print full details
-    kprintf("\n%[E]=== EXCEPTION OCCURRED ===%[D]\n");
+    // PRODUCTION: Handle user-space exceptions - kill process, don't panic kernel!
+    if (from_user_space) {
+        extern process_t* process_get_current(void);
+        process_t* current = process_get_current();
+
+        if (current) {
+            kprintf("\n%[E]=== USER PROCESS CRASH (Exception) ===%[D]\n");
+            kprintf("%[E]PID: %lu%[D]\n", current->pid);
+            kprintf("%[E]Exception Vector: %llu ", frame->vector);
+
+            // Print exception name
+            switch(frame->vector) {
+                case EXCEPTION_DIVIDE_ERROR:
+                    kprintf("(Divide by Zero)%[D]\n");
+                    break;
+                case EXCEPTION_GENERAL_PROTECTION:
+                    kprintf("(General Protection Fault)%[D]\n");
+                    break;
+                case 6: // Invalid Opcode
+                    kprintf("(Invalid Opcode)%[D]\n");
+                    break;
+                case 11: // Segment Not Present
+                    kprintf("(Segment Not Present)%[D]\n");
+                    break;
+                case 12: // Stack Segment Fault
+                    kprintf("(Stack Segment Fault)%[D]\n");
+                    break;
+                default:
+                    kprintf("(Unknown)%[D]\n");
+                    break;
+            }
+
+            kprintf("%[E]Error Code: 0x%llx%[D]\n", frame->error_code);
+            kprintf("%[E]RIP: 0x%llx%[D]\n", frame->rip);
+            kprintf("%[E]RSP: 0x%llx%[D]\n", frame->rsp);
+            kprintf("%[E]RFLAGS: 0x%llx%[D]\n", frame->rflags);
+            kprintf("%[E]Killing process PID=%lu...%[D]\n\n", current->pid);
+
+            // Mark process as zombie and yield to next process
+            current->state = PROCESS_STATE_ZOMBIE;
+            extern void scheduler_yield_cooperative(interrupt_frame_t* frame);
+            scheduler_yield_cooperative(frame);
+
+            // scheduler_yield_cooperative modifies frame to switch to next process
+            return;
+        }
+    }
+
+    // Kernel-space exception - this is CRITICAL! Print full details and panic
+    kprintf("\n%[E]=== KERNEL EXCEPTION (CRITICAL!) ===%[D]\n");
     kprintf("%[E]Exception Vector: %llu%[D]\n", frame->vector);
     kprintf("%[E]Error Code: 0x%llx%[D]\n", frame->error_code);
     kprintf("%[E]RIP: 0x%llx%[D]\n", frame->rip);
@@ -200,16 +285,19 @@ void exception_handler(interrupt_frame_t* frame) {
     // Дополнительная информация для некоторых исключений
     switch(frame->vector) {
         case EXCEPTION_DIVIDE_ERROR:
-            kprintf("%[E]Divide by zero error!%[D]\n");
-            panic("Divide by zero");
+            kprintf("%[E]Divide by zero error in kernel!%[D]\n");
+            panic("Kernel divide by zero");
             break;
         case EXCEPTION_GENERAL_PROTECTION:
-            kprintf("%[E]General Protection Fault!%[D]\n");
-            panic("General Protection Fault");
+            kprintf("%[E]General Protection Fault in kernel!%[D]\n");
+            panic("Kernel General Protection Fault");
             break;
         case EXCEPTION_DOUBLE_FAULT:
             kprintf("%[E]Double Fault! System unstable!%[D]\n");
             panic("Double Fault");
+            break;
+        default:
+            panic("Kernel exception");
             break;
     }
 
