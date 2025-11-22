@@ -616,19 +616,155 @@ void workflow_on_event_completed(uint64_t workflow_id, uint64_t event_id,
 }
 
 // ============================================================================
-// DAG ANALYSIS
+// DAG ANALYSIS - PRODUCTION-READY with CYCLE DETECTION
 // ============================================================================
 
-int workflow_analyze_dag(Workflow* workflow) {
-    if (!workflow) return -1;
+// DFS-based cycle detection helper
+// Colors: 0=WHITE (unvisited), 1=GRAY (visiting), 2=BLACK (visited)
+static int workflow_dfs_cycle_check(Workflow* workflow, uint32_t node_idx,
+                                    uint8_t* colors, uint32_t* cycle_path,
+                                    int path_len) {
+    if (node_idx >= workflow->event_count) {
+        kprintf("[WORKFLOW] ERROR: Invalid node index %u in DFS\n", node_idx);
+        return -1;
+    }
 
-    // Analyze DAG structure for optimization opportunities
-    int has_cycles = 0;
+    // Mark as GRAY (currently visiting)
+    colors[node_idx] = 1;
+    cycle_path[path_len] = node_idx;
+    path_len++;
+
+    WorkflowNode* node = &workflow->events[node_idx];
+
+    // Check all dependencies
+    for (uint32_t i = 0; i < node->dependency_count; i++) {
+        uint32_t dep_idx = node->dependencies[i];
+
+        // DEFENSIVE: Validate dependency index
+        if (dep_idx >= workflow->event_count) {
+            kprintf("[WORKFLOW] ERROR: Node %u has invalid dependency %u (max=%u)\n",
+                    node_idx, dep_idx, workflow->event_count);
+            return -1;
+        }
+
+        if (colors[dep_idx] == 1) {
+            // CYCLE DETECTED! Print cycle path
+            kprintf("[WORKFLOW] CRITICAL: Cycle detected in DAG!\n");
+            kprintf("[WORKFLOW] Cycle path: ");
+            for (int j = 0; j < path_len; j++) {
+                kprintf("%u -> ", cycle_path[j]);
+            }
+            kprintf("%u (back to %u)\n", dep_idx, dep_idx);
+            return 1;  // Cycle found
+        }
+
+        if (colors[dep_idx] == 0) {
+            // WHITE node - recurse
+            int result = workflow_dfs_cycle_check(workflow, dep_idx, colors,
+                                                   cycle_path, path_len);
+            if (result != 0) {
+                return result;  // Propagate cycle detection or error
+            }
+        }
+        // BLACK nodes are already fully explored, skip
+    }
+
+    // Mark as BLACK (fully explored)
+    colors[node_idx] = 2;
+    return 0;
+}
+
+int workflow_analyze_dag(Workflow* workflow) {
+    if (!workflow) {
+        kprintf("[WORKFLOW] ERROR: analyze_dag called with NULL workflow\n");
+        return -1;
+    }
+
+    if (workflow->event_count == 0) {
+        kprintf("[WORKFLOW] WARNING: Workflow has no events\n");
+        return 0;
+    }
+
+    if (workflow->event_count > WORKFLOW_MAX_EVENTS) {
+        kprintf("[WORKFLOW] ERROR: Event count %u exceeds max %d\n",
+                workflow->event_count, WORKFLOW_MAX_EVENTS);
+        return -1;
+    }
+
+    kprintf("[WORKFLOW] Analyzing DAG for workflow '%s' (ID=%lu, events=%u)...\n",
+            workflow->name, workflow->workflow_id, workflow->event_count);
+
+    // ========================================================================
+    // STEP 1: VALIDATE ALL DEPENDENCIES
+    // ========================================================================
+    int invalid_deps = 0;
+    for (uint32_t i = 0; i < workflow->event_count; i++) {
+        WorkflowNode* node = &workflow->events[i];
+
+        if (node->dependency_count > WORKFLOW_MAX_DEPENDENCIES) {
+            kprintf("[WORKFLOW] ERROR: Node %u has %u dependencies (max=%d)\n",
+                    i, node->dependency_count, WORKFLOW_MAX_DEPENDENCIES);
+            invalid_deps++;
+            continue;
+        }
+
+        // Check each dependency
+        for (uint32_t j = 0; j < node->dependency_count; j++) {
+            uint32_t dep_idx = node->dependencies[j];
+
+            if (dep_idx >= workflow->event_count) {
+                kprintf("[WORKFLOW] ERROR: Node %u dependency[%u]=%u out of bounds\n",
+                        i, j, dep_idx);
+                invalid_deps++;
+            }
+
+            // Check for self-dependency
+            if (dep_idx == i) {
+                kprintf("[WORKFLOW] ERROR: Node %u depends on itself!\n", i);
+                invalid_deps++;
+            }
+        }
+    }
+
+    if (invalid_deps > 0) {
+        kprintf("[WORKFLOW] DAG validation FAILED: %d invalid dependencies\n", invalid_deps);
+        return -1;
+    }
+
+    // ========================================================================
+    // STEP 2: CYCLE DETECTION (DFS-based)
+    // ========================================================================
+    uint8_t colors[WORKFLOW_MAX_EVENTS];
+    uint32_t cycle_path[WORKFLOW_MAX_EVENTS];
+
+    // Initialize all nodes as WHITE (unvisited)
+    for (uint32_t i = 0; i < workflow->event_count; i++) {
+        colors[i] = 0;
+    }
+
+    // Run DFS from each unvisited node
+    for (uint32_t i = 0; i < workflow->event_count; i++) {
+        if (colors[i] == 0) {  // WHITE
+            int result = workflow_dfs_cycle_check(workflow, i, colors, cycle_path, 0);
+            if (result > 0) {
+                kprintf("[WORKFLOW] DAG validation FAILED: Cycle detected!\n");
+                return -1;  // Cycle found
+            } else if (result < 0) {
+                kprintf("[WORKFLOW] DAG validation FAILED: Error during cycle check\n");
+                return -1;  // Error
+            }
+        }
+    }
+
+    kprintf("[WORKFLOW] Cycle check PASSED - DAG is acyclic\n");
+
+    // ========================================================================
+    // STEP 3: PARALLELISM ANALYSIS
+    // ========================================================================
+    int independent_count = 0;
     int max_parallel = 0;
 
-    // Simple analysis: check if any events have no dependencies
-    // Those can potentially run in parallel
-    int independent_count = 0;
+    // Count nodes with no dependencies (can start immediately)
     for (uint32_t i = 0; i < workflow->event_count; i++) {
         if (workflow->events[i].dependency_count == 0) {
             independent_count++;
@@ -638,13 +774,13 @@ int workflow_analyze_dag(Workflow* workflow) {
     if (independent_count > 1) {
         workflow->parallel_safe = 1;
         max_parallel = independent_count;
+        kprintf("[WORKFLOW] Parallelism: %d nodes can run in parallel\n", max_parallel);
     } else {
         workflow->parallel_safe = 0;
+        kprintf("[WORKFLOW] Parallelism: Sequential execution required\n");
     }
 
-    kprintf("[WORKFLOW] DAG analysis: parallel_safe=%d, max_parallel=%d\n",
-            workflow->parallel_safe, max_parallel);
-
+    kprintf("[WORKFLOW] DAG analysis COMPLETE - VALID\n");
     return 0;
 }
 
