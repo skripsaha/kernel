@@ -458,10 +458,10 @@ void scheduler_restore_context(process_t* proc, void* interrupt_frame) {
         return;
     }
 
-    // DEFENSIVE: Validate process state
-    if (proc->state == PROCESS_STATE_TERMINATED || proc->state == PROCESS_STATE_ZOMBIE) {
-        kprintf("[SCHEDULER] ERROR: Attempting to restore DEAD process PID=%lu (state=%d)\n",
-                proc->pid, proc->state);
+    // DEFENSIVE: Validate process state (don't restore ZOMBIE processes)
+    if (proc->state == PROCESS_STATE_ZOMBIE) {
+        kprintf("[SCHEDULER] ERROR: Attempting to restore ZOMBIE process PID=%lu\n",
+                proc->pid);
         return;
     }
 
