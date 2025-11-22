@@ -2,6 +2,7 @@
 #include "klib.h"
 #include "process.h"
 #include "idt.h"  // For interrupt_frame_t
+#include "../eventdriven/storage/tagfs.h"  // For graceful shutdown sync
 
 // ============================================================================
 // EVENT-DRIVEN HYBRID SCHEDULER
@@ -179,9 +180,11 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
             time_slice_remaining = TIME_SLICE_TICKS;
             kprintf("[SCHEDULER] Context switch after cleanup: destroyed -> PID %lu\n", next->pid);
         } else {
-            // No processes left - halt
+            // No processes left - graceful shutdown
             kprintf("[SCHEDULER] All processes terminated - system halting\n");
-            kprintf("[SCHEDULER] System idle - no processes to run\n");
+            kprintf("[SCHEDULER] Performing graceful shutdown: syncing filesystem...\n");
+            tagfs_sync();  // PRODUCTION: Flush all data to disk before halt!
+            kprintf("[SCHEDULER] Filesystem synced - system idle\n");
             while (1) {
                 asm volatile("hlt");
             }
@@ -253,9 +256,11 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
     } else {
         // No other process to run
         if (current->state == PROCESS_STATE_ZOMBIE) {
-            // Current process is ZOMBIE and no other processes available
+            // Current process is ZOMBIE and no other processes available - graceful shutdown
             kprintf("[SCHEDULER] All processes terminated - system halting\n");
-            kprintf("[SCHEDULER] System idle - no processes to run\n");
+            kprintf("[SCHEDULER] Performing graceful shutdown: syncing filesystem...\n");
+            tagfs_sync();  // PRODUCTION: Flush all data to disk before halt!
+            kprintf("[SCHEDULER] Filesystem synced - system idle\n");
             // Enter halt loop - wait for interrupts (but there won't be any work)
             while (1) {
                 asm volatile("hlt");
@@ -349,8 +354,11 @@ void scheduler_tick(interrupt_frame_t* frame) {
                 time_slice_remaining = TIME_SLICE_TICKS;
                 kprintf("[SCHEDULER] Context switch (timer after cleanup): destroyed -> PID %lu\n", next->pid);
             } else {
+                // No processes left - graceful shutdown
                 kprintf("[SCHEDULER] All processes terminated (timer) - system halting\n");
-                kprintf("[SCHEDULER] System idle - no processes to run\n");
+                kprintf("[SCHEDULER] Performing graceful shutdown: syncing filesystem...\n");
+                tagfs_sync();  // PRODUCTION: Flush all data to disk before halt!
+                kprintf("[SCHEDULER] Filesystem synced - system idle\n");
                 while (1) {
                     asm volatile("hlt");
                 }
@@ -410,9 +418,11 @@ void scheduler_tick(interrupt_frame_t* frame) {
         } else {
             // No other process to run
             if (current->state == PROCESS_STATE_ZOMBIE) {
-                // Current process is ZOMBIE and no other processes available
+                // Current process is ZOMBIE and no other processes available - graceful shutdown
                 kprintf("[SCHEDULER] All processes terminated (timer) - system halting\n");
-                kprintf("[SCHEDULER] System idle - no processes to run\n");
+                kprintf("[SCHEDULER] Performing graceful shutdown: syncing filesystem...\n");
+                tagfs_sync();  // PRODUCTION: Flush all data to disk before halt!
+                kprintf("[SCHEDULER] Filesystem synced - system idle\n");
                 // Enter halt loop
                 while (1) {
                     asm volatile("hlt");
