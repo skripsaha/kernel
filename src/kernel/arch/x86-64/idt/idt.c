@@ -519,14 +519,14 @@ void syscall_handler(interrupt_frame_t* frame) {
         extern void scheduler_yield_cooperative(interrupt_frame_t* frame);
         scheduler_yield_cooperative(frame);
 
-        // CRITICAL: scheduler_restore_context() modified frame for new process,
-        // but we're still executing old process code path here.
-        // Loop forever to ensure we don't continue execution.
-        // IMPORTANT: Don't use CLI - we need timer IRQ to continue!
-        // HLT will wake on interrupt, loop back, and eventually IRETQ to new process.
-        while (1) {
-            asm volatile("hlt");
-        }
+        // CRITICAL: scheduler_restore_context() modified frame for new process.
+        // Just return normally - IRETQ will use the modified frame and jump to new process!
+        // We're still executing old process code, but that's OK - IRETQ switches context.
+
+        // NOTE: This point should never be reached (new process takes over via IRETQ)
+        // But if we somehow return here, just return success
+        frame->rax = 0;
+        return;
     }
 
     // Unknown flags
