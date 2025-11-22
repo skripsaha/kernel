@@ -33,10 +33,10 @@ void process_init(void) {
 // ============================================================================
 
 process_t* process_create(void* code, uint64_t code_size, uint64_t entry_offset) {
-    // Find free slot
+    // Find free slot (check PID, not state, because PROCESS_STATE_READY == 0!)
     process_t* proc = 0;
     for (int i = 0; i < PROCESS_MAX_COUNT; i++) {
-        if (process_table[i].state == 0) {
+        if (process_table[i].pid == 0) {
             proc = &process_table[i];
             break;
         }
