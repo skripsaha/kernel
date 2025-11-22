@@ -275,9 +275,41 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
 void scheduler_tick(interrupt_frame_t* frame) {
     stats.total_ticks++;
 
+    // DEFENSIVE: Validate interrupt frame
+    if (!frame) {
+        kprintf("[SCHEDULER] CRITICAL: scheduler_tick called with NULL frame!\n");
+        return;
+    }
+
     process_t* current = process_get_current();
 
+    // DEBUG: Log scheduler activity (first 20 ticks only)
+    static int debug_ticks = 0;
+    if (debug_ticks < 20) {
+        kprintf("[SCHEDULER] Tick %lu: current=%s ready_queue=%d time_slice=%d\n",
+                stats.total_ticks,
+                current ? "YES" : "NULL",
+                ready_queue_count,
+                time_slice_remaining);
+        debug_ticks++;
+    }
+
     if (!current) {
+        // No current process - check if there are any ready processes
+        if (ready_queue_count > 0) {
+            kprintf("[SCHEDULER] No current process, but %d in ready queue - picking one\n",
+                    ready_queue_count);
+
+            process_t* next = scheduler_pick_next();
+            if (next) {
+                scheduler_restore_context(next, frame);
+                next->state = PROCESS_STATE_RUNNING;
+                process_set_current(next);
+                stats.context_switches++;
+                time_slice_remaining = TIME_SLICE_TICKS;
+                kprintf("[SCHEDULER] Started process PID=%lu from idle\n", next->pid);
+            }
+        }
         return;  // No current process to preempt
     }
 
@@ -415,7 +447,35 @@ void scheduler_save_context(process_t* proc, void* interrupt_frame) {
 
 // Restore process context (modify interrupt frame for IRETQ)
 void scheduler_restore_context(process_t* proc, void* interrupt_frame) {
-    if (!proc || !interrupt_frame) {
+    // DEFENSIVE: Validate inputs
+    if (!proc) {
+        kprintf("[SCHEDULER] CRITICAL: restore_context called with NULL process!\n");
+        return;
+    }
+
+    if (!interrupt_frame) {
+        kprintf("[SCHEDULER] CRITICAL: restore_context called with NULL frame!\n");
+        return;
+    }
+
+    // DEFENSIVE: Validate process state
+    if (proc->state == PROCESS_STATE_TERMINATED || proc->state == PROCESS_STATE_ZOMBIE) {
+        kprintf("[SCHEDULER] ERROR: Attempting to restore DEAD process PID=%lu (state=%d)\n",
+                proc->pid, proc->state);
+        return;
+    }
+
+    // DEFENSIVE: Validate CR3 exists
+    if (!proc->cr3) {
+        kprintf("[SCHEDULER] CRITICAL: Process PID=%lu has NO page table (CR3=0)!\n",
+                proc->pid);
+        return;
+    }
+
+    // DEFENSIVE: Validate VMM context
+    if (!proc->vmm_context) {
+        kprintf("[SCHEDULER] CRITICAL: Process PID=%lu has NO VMM context!\n",
+                proc->pid);
         return;
     }
 
@@ -430,13 +490,21 @@ void scheduler_restore_context(process_t* proc, void* interrupt_frame) {
     frame->ss = proc->ss;
 
     // Switch to process page table (CR3)
-    if (proc->cr3) {
-        asm volatile("mov %0, %%cr3" : : "r"(proc->cr3) : "memory");
-    }
+    // CRITICAL for address space isolation!
+    asm volatile("mov %0, %%cr3" : : "r"(proc->cr3) : "memory");
 
     // Update TSS RSP0 for kernel stack
+    // This ensures syscalls/interrupts use kernel stack, not user stack
     extern void tss_set_rsp0(uint64_t rsp0);
     tss_set_rsp0(0x900000);  // Kernel stack for syscalls/interrupts
+
+    // DEBUG: Log context switch (only first few times)
+    static int switch_count = 0;
+    if (switch_count < 10) {
+        kprintf("[SCHEDULER] Context restored: PID=%lu RIP=0x%p RSP=0x%p CR3=0x%p\n",
+                proc->pid, (void*)proc->rip, (void*)proc->rsp, (void*)proc->cr3);
+        switch_count++;
+    }
 }
 
 // ============================================================================
