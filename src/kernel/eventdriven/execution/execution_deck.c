@@ -16,8 +16,20 @@ static DeckQueue* execution_queue = 0;
 // ============================================================================
 
 void execution_deck_init(RoutingTable* rtable) {
+    // DEFENSIVE: Validate routing table
+    if (!rtable) {
+        kprintf("[EXECUTION] ERROR: NULL routing table passed to init\n");
+        return;
+    }
+
     routing_table = rtable;
     execution_queue = guide_get_execution_queue();
+
+    // DEFENSIVE: Validate execution queue
+    if (!execution_queue) {
+        kprintf("[EXECUTION] ERROR: Failed to get execution queue from guide\n");
+        return;
+    }
 
     execution_stats.events_executed = 0;
     execution_stats.responses_sent = 0;
@@ -31,6 +43,19 @@ void execution_deck_init(RoutingTable* rtable) {
 // ============================================================================
 
 static void collect_results(RoutingEntry* entry, RingResult* result) {
+    // DEFENSIVE: Validate parameters
+    if (!entry) {
+        kprintf("[EXECUTION] ERROR: collect_results called with NULL entry\n");
+        atomic_increment_u64((volatile uint64_t*)&execution_stats.errors);
+        return;
+    }
+
+    if (!result) {
+        kprintf("[EXECUTION] ERROR: collect_results called with NULL result\n");
+        atomic_increment_u64((volatile uint64_t*)&execution_stats.errors);
+        return;
+    }
+
     // Initialize RingResult
     result->event_id = entry->event_id;
     result->workflow_id = entry->event_copy.user_id;  // user_id contains workflow_id
@@ -49,6 +74,14 @@ static void collect_results(RoutingEntry* entry, RingResult* result) {
     }
 
     if (result_index >= 0) {
+        // DEFENSIVE: Validate result_index is in range
+        if (result_index >= MAX_ROUTING_STEPS) {
+            kprintf("[EXECUTION] ERROR: Invalid result_index %d (max %d)\n",
+                    result_index, MAX_ROUTING_STEPS);
+            atomic_increment_u64((volatile uint64_t*)&execution_stats.errors);
+            return;
+        }
+
         // Copy deck result to RingResult
         void* deck_result = entry->deck_results[result_index];
 
@@ -68,6 +101,13 @@ static void collect_results(RoutingEntry* entry, RingResult* result) {
 // ============================================================================
 
 static void process_completed_event(RoutingEntry* entry) {
+    // DEFENSIVE: Validate entry
+    if (!entry) {
+        kprintf("[EXECUTION] ERROR: process_completed_event called with NULL entry\n");
+        atomic_increment_u64((volatile uint64_t*)&execution_stats.errors);
+        return;
+    }
+
     // Get current running process
     process_t* proc = process_get_current();
 
@@ -200,6 +240,14 @@ static void process_completed_event(RoutingEntry* entry) {
     }
 
     // 6. Remove routing entry from table (cleanup)
+    // DEFENSIVE: Validate routing table before removing
+    if (!routing_table) {
+        kprintf("[EXECUTION] ERROR: routing_table is NULL during cleanup for event %lu\n",
+                entry->event_id);
+        atomic_increment_u64((volatile uint64_t*)&execution_stats.errors);
+        return;
+    }
+
     routing_table_remove(routing_table, entry->event_id);
 
     atomic_increment_u64((volatile uint64_t*)&execution_stats.events_executed);
@@ -211,10 +259,24 @@ static void process_completed_event(RoutingEntry* entry) {
 
 // Обработать одно завершённое событие (для синхронной обработки)
 int execution_deck_run_once(void) {
+    // DEFENSIVE: Validate execution queue
+    if (!execution_queue) {
+        kprintf("[EXECUTION] ERROR: execution_queue is NULL in run_once\n");
+        atomic_increment_u64((volatile uint64_t*)&execution_stats.errors);
+        return 0;
+    }
+
     // Получаем завершённое событие от Guide
     RoutingEntry* entry = deck_queue_pop(execution_queue);
 
     if (entry) {
+        // DEFENSIVE: Validate entry before processing
+        if (entry->event_id == 0) {
+            kprintf("[EXECUTION] WARNING: Popped entry with event_id=0\n");
+            atomic_increment_u64((volatile uint64_t*)&execution_stats.errors);
+            return 0;
+        }
+
         // Обрабатываем завершённое событие
         process_completed_event(entry);
         return 1;  // Обработано
