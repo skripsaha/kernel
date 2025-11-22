@@ -73,6 +73,14 @@ process_t* process_create(void* code, uint64_t code_size, uint64_t entry_offset)
     // Copy code to physical memory (identity-mapped for now)
     memcpy((void*)code_phys, code, code_size);
 
+    // DEBUG: Show first bytes of user code
+    uint8_t* code_bytes = (uint8_t*)code_phys;
+    kprintf("[PROCESS] User code first 16 bytes: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            code_bytes[0], code_bytes[1], code_bytes[2], code_bytes[3],
+            code_bytes[4], code_bytes[5], code_bytes[6], code_bytes[7],
+            code_bytes[8], code_bytes[9], code_bytes[10], code_bytes[11],
+            code_bytes[12], code_bytes[13], code_bytes[14], code_bytes[15]);
+
     // ========================================================================
     // CREATE VIRTUAL MEMORY MAPPINGS FOR USER SPACE
     // ========================================================================

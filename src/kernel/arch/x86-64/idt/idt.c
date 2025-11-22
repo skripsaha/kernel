@@ -354,7 +354,11 @@ void syscall_handler(interrupt_frame_t* frame) {
         // Ring buffers already validated in input validation section
         EventRing* event_ring = (EventRing*)proc->event_ring;
 
-        kprintf("[SYSCALL] kernel_notify(SUBMIT) - processing EventRing\n");
+        kprintf("[SYSCALL] kernel_notify(SUBMIT) from RIP=0x%lx, RSP=0x%lx\n",
+                frame->rip, frame->rsp);
+        kprintf("[SYSCALL] EventRing: head=%u tail=%u empty=%d\n",
+                event_ring->head, event_ring->tail,
+                wf_event_ring_is_empty(event_ring));
 
         uint64_t processed = 0;
 
