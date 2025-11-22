@@ -522,9 +522,10 @@ void syscall_handler(interrupt_frame_t* frame) {
         // CRITICAL: scheduler_restore_context() modified frame for new process,
         // but we're still executing old process code path here.
         // Loop forever to ensure we don't continue execution.
-        // IRETQ will jump to new process context.
+        // IMPORTANT: Don't use CLI - we need timer IRQ to continue!
+        // HLT will wake on interrupt, loop back, and eventually IRETQ to new process.
         while (1) {
-            asm volatile("cli; hlt");
+            asm volatile("hlt");
         }
     }
 
