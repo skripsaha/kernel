@@ -239,26 +239,21 @@ void kernel_main(e820_entry_t* e820_map, uint64_t e820_count, uint64_t mem_start
     scheduler_add_process(proc2);
     scheduler_add_process(proc3);
 
-    // Pick first process and enter user mode
-    // Scheduler will handle switching between processes!
-    extern process_t* scheduler_pick_next(void);
-    process_t* first = scheduler_pick_next();
-
-    if (!first) {
-        panic("No processes in ready queue!");
-    }
-
-    kprintf("[KERNEL] Starting with PID=%lu\n", first->pid);
+    kprintf("[KERNEL] All %d processes added to ready queue\n", 3);
     kprintf("[KERNEL] Transitioning to Ring 3 (multi-process mode)...\n\n");
 
     // CRITICAL: Enable interrupts NOW (processes are created and ready!)
-    kprintf("[KERNEL] Enabling interrupts...\n");
+    // Scheduler will automatically pick first process from ready queue on first timer tick
+    kprintf("[KERNEL] Enabling interrupts - scheduler will pick first process...\n");
     asm volatile("sti");
-    kprintf("[KERNEL] Interrupts enabled! Scheduler is active.\n\n");
 
-    // Enter user mode - scheduler will switch between processes when they yield!
-    process_enter_usermode(first);
+    // Idle loop - scheduler handles everything from here via timer IRQ
+    // First timer tick will pick a process from ready queue and start execution
+    kprintf("[KERNEL] Entering idle loop - scheduler is now in control\n\n");
+    while (1) {
+        asm volatile("hlt");  // Wait for interrupts
+    }
 
     // Should never reach here
-    panic("process_enter_usermode returned!");
+    panic("Escaped from idle loop!");
 }

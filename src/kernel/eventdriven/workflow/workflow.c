@@ -422,8 +422,9 @@ void workflow_on_event_completed(uint64_t workflow_id, uint64_t event_id,
     }
 
     if (!workflow->context) {
-        kprintf("[WORKFLOW] WARNING: Event %lu completed but workflow %lu has no context\n",
-                event_id, workflow_id);
+        // This is normal for direct events submitted via EventRing (not workflow activation)
+        // Workflows can be registered but not activated - events are sent directly
+        // Just cleanup result and return silently
         if (result) {
             kfree(result);
         }

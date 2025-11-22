@@ -519,14 +519,17 @@ void syscall_handler(interrupt_frame_t* frame) {
         proc->state = PROCESS_STATE_ZOMBIE;
 
         // Cleanup will be handled by scheduler
-        // For now, just yield and don't come back
+        // Yield to another process - scheduler will destroy this process and switch context
         extern void scheduler_yield_cooperative(interrupt_frame_t* frame);
         scheduler_yield_cooperative(frame);
 
-        // Should never reach here - scheduler won't schedule TERMINATED processes
-        kprintf("[SYSCALL] ERROR: Returned from EXIT (should not happen!)\n");
-        frame->rax = 0;
-        return;
+        // CRITICAL: scheduler_restore_context() modified frame for new process,
+        // but we're still executing old process code path here.
+        // Loop forever to ensure we don't continue execution.
+        // IRETQ will jump to new process context.
+        while (1) {
+            asm volatile("cli; hlt");
+        }
     }
 
     // Unknown flags
