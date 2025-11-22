@@ -218,6 +218,7 @@ process_t* process_create(void* code, uint64_t code_size, uint64_t entry_offset)
     proc->syscall_count = 0;
     proc->current_workflow_id = 0;
     proc->creation_time = rdtsc();
+    proc->last_syscall_tick = 0;  // Will be set on first syscall
 
     kprintf("[PROCESS] Created process PID=%lu\n", proc->pid);
     kprintf("[PROCESS]   Code: 0x%p -> 0x%p (phys: 0x%p, %lu bytes)\n",
@@ -549,4 +550,12 @@ process_t* process_get_by_index(int index) {
         return NULL;
     }
     return &process_table[index];
+}
+
+// Get all processes (for watchdog and monitoring)
+process_t* process_get_all(uint64_t* count) {
+    if (count) {
+        *count = PROCESS_MAX_COUNT;
+    }
+    return process_table;
 }

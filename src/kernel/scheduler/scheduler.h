@@ -30,6 +30,9 @@ typedef struct {
     uint64_t total_ticks;            // Total scheduler ticks
 } scheduler_stats_t;
 
+// Global scheduler statistics (accessible for watchdog and monitoring)
+extern scheduler_stats_t scheduler_stats;
+
 // ============================================================================
 // SCHEDULER API
 // ============================================================================

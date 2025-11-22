@@ -11,6 +11,7 @@
 #include "workflow.h"  // Workflow API
 #include "routing_table.h"  // Routing table
 #include "process.h"  // Process management
+#include "scheduler.h"  // Scheduler stats (for watchdog)
 #include "atomics.h"  // Atomic operations
 
 static idt_entry_t idt[IDT_ENTRIES];
@@ -389,6 +390,10 @@ void syscall_handler(interrupt_frame_t* frame) {
         frame->rax = (uint64_t)-1;
         return;
     }
+
+    // PRODUCTION: Update watchdog timestamp (shows process is alive)
+    proc->last_syscall_tick = scheduler_stats.total_ticks;
+    proc->syscall_count++;
 
     // 2. Validate workflow_id bounds (max 16 workflows)
     #define MAX_WORKFLOWS 16

@@ -63,6 +63,7 @@ typedef struct {
     // Statistics
     uint64_t syscall_count;         // Number of syscalls made
     uint64_t creation_time;         // RDTSC at creation
+    uint64_t last_syscall_tick;     // Timer tick at last syscall (for watchdog)
     int exit_code;                  // Exit code (when ZOMBIE)
 
 } process_t;
@@ -113,5 +114,9 @@ void process_print_all(void);
 // === ITERATION ===
 // Get process by index (for iteration through process table)
 process_t* process_get_by_index(int index);
+
+// Get all processes (returns process_table pointer and count)
+// Used by watchdog and monitoring systems
+process_t* process_get_all(uint64_t* count);
 
 #endif  // PROCESS_H

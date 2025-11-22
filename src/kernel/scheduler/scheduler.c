@@ -40,8 +40,8 @@ static process_t* current_running = NULL;
 static int time_slice_remaining = 0;
 static const int TIME_SLICE_TICKS = 10;  // 10 ticks = 100ms at 100Hz (LARGE!)
 
-// Statistics
-static scheduler_stats_t stats = {0};
+// Statistics (exported for watchdog and other subsystems)
+scheduler_stats_t scheduler_stats = {0};
 
 // ============================================================================
 // INITIALIZATION
@@ -56,7 +56,7 @@ void scheduler_init(void) {
     current_running = NULL;
     time_slice_remaining = TIME_SLICE_TICKS;
 
-    memset(&stats, 0, sizeof(stats));
+    memset(&scheduler_stats, 0, sizeof(scheduler_stats));
 
     kprintf("[SCHEDULER] Ready queue size: %d processes\n", PROCESS_MAX_COUNT);
     kprintf("[SCHEDULER] Time slice: %d ticks (%d ms at 100Hz) - PROTECTION ONLY\n",
@@ -153,7 +153,7 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
         return;  // No current process
     }
 
-    stats.voluntary_yields++;
+    scheduler_stats.voluntary_yields++;
 
     kprintf("[SCHEDULER] Cooperative yield from PID=%lu\n", current->pid);
 
@@ -176,7 +176,7 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
             scheduler_restore_context(next, frame);
             next->state = PROCESS_STATE_RUNNING;
             process_set_current(next);
-            stats.context_switches++;
+            scheduler_stats.context_switches++;
             time_slice_remaining = TIME_SLICE_TICKS;
             kprintf("[SCHEDULER] Context switch after cleanup: destroyed -> PID %lu\n", next->pid);
         } else {
@@ -205,7 +205,7 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
             next->state = PROCESS_STATE_RUNNING;
             process_set_current(next);
 
-            stats.context_switches++;
+            scheduler_stats.context_switches++;
             time_slice_remaining = TIME_SLICE_TICKS;
 
             kprintf("[SCHEDULER] Context switch (waiting->ready): PID %lu (WAITING) -> PID %lu (RUNNING)\n",
@@ -229,7 +229,7 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
                     scheduler_restore_context(next, frame);
                     next->state = PROCESS_STATE_RUNNING;
                     process_set_current(next);
-                    stats.context_switches++;
+                    scheduler_stats.context_switches++;
                     time_slice_remaining = TIME_SLICE_TICKS;
                     kprintf("[SCHEDULER] Context switch (idle->ready): -> PID %lu\n", next->pid);
                     return;
@@ -248,7 +248,7 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
         next->state = PROCESS_STATE_RUNNING;
         process_set_current(next);
 
-        stats.context_switches++;
+        scheduler_stats.context_switches++;
         time_slice_remaining = TIME_SLICE_TICKS;  // Reset time slice
 
         kprintf("[SCHEDULER] Context switch (cooperative): PID %lu -> PID %lu\n",
@@ -278,12 +278,51 @@ void scheduler_yield_cooperative(interrupt_frame_t* frame) {
 
 // Called from timer IRQ - only for protection against infinite loops
 void scheduler_tick(interrupt_frame_t* frame) {
-    stats.total_ticks++;
+    scheduler_stats.total_ticks++;
 
     // DEFENSIVE: Validate interrupt frame
     if (!frame) {
         kprintf("[SCHEDULER] CRITICAL: scheduler_tick called with NULL frame!\n");
         return;
+    }
+
+    // PRODUCTION: WATCHDOG - Check for hung processes (every 100 ticks = 1 second)
+    if (scheduler_stats.total_ticks % 100 == 0) {
+        extern process_t* process_get_all(uint64_t* count);
+        uint64_t process_count = 0;
+        process_t* all_processes = process_get_all(&process_count);
+
+        for (uint64_t i = 0; i < process_count; i++) {
+            process_t* proc = &all_processes[i];
+
+            // Skip zombie and waiting processes
+            if (proc->state == PROCESS_STATE_ZOMBIE || proc->state == PROCESS_STATE_WAITING) {
+                continue;
+            }
+
+            // Check if process has EVER made a syscall (last_syscall_tick == 0 means never)
+            if (proc->last_syscall_tick == 0) {
+                // New process that hasn't made any syscalls yet - give it grace period
+                // Check if it's been alive for > 1000 ticks (10 seconds) without ANY syscall
+                continue;  // Skip for now - process might be initializing
+            }
+
+            // WATCHDOG: If no syscall in 1000 ticks (10 seconds) → KILL
+            uint64_t ticks_since_syscall = scheduler_stats.total_ticks - proc->last_syscall_tick;
+            if (ticks_since_syscall > 1000) {
+                kprintf("\n%[E]=== WATCHDOG: HUNG PROCESS DETECTED ===%[D]\n");
+                kprintf("%[E]PID: %lu%[D]\n", proc->pid);
+                kprintf("%[E]State: %d%[D]\n", proc->state);
+                kprintf("%[E]Last syscall: %lu ticks ago (%.1f seconds)%[D]\n",
+                        ticks_since_syscall, (double)ticks_since_syscall / 100.0);
+                kprintf("%[E]RIP: 0x%llx%[D]\n", proc->rip);
+                kprintf("%[E]RSP: 0x%llx%[D]\n", proc->rsp);
+                kprintf("%[E]Killing hung process...%[D]\n\n");
+
+                // Mark as zombie - will be cleaned up on next context switch
+                proc->state = PROCESS_STATE_ZOMBIE;
+            }
+        }
     }
 
     process_t* current = process_get_current();
@@ -292,7 +331,7 @@ void scheduler_tick(interrupt_frame_t* frame) {
     static int debug_ticks = 0;
     if (debug_ticks < 20) {
         kprintf("[SCHEDULER] Tick %lu: current=%s ready_queue=%d time_slice=%d\n",
-                stats.total_ticks,
+                scheduler_stats.total_ticks,
                 current ? "YES" : "NULL",
                 ready_queue_count,
                 time_slice_remaining);
@@ -316,7 +355,7 @@ void scheduler_tick(interrupt_frame_t* frame) {
             scheduler_restore_context(next, frame);
             next->state = PROCESS_STATE_RUNNING;
             process_set_current(next);
-            stats.context_switches++;
+            scheduler_stats.context_switches++;
             time_slice_remaining = TIME_SLICE_TICKS;
             kprintf("[SCHEDULER] Started process PID=%lu from idle\n", next->pid);
         }
@@ -328,7 +367,7 @@ void scheduler_tick(interrupt_frame_t* frame) {
 
     if (time_slice_remaining <= 0) {
         // Time slice expired - preempt! (This should be RARE!)
-        stats.preemptions++;
+        scheduler_stats.preemptions++;
 
         kprintf("[SCHEDULER] Timer preemption of PID=%lu (protection mechanism)\n",
                 current->pid);
@@ -350,7 +389,7 @@ void scheduler_tick(interrupt_frame_t* frame) {
                 scheduler_restore_context(next, frame);
                 next->state = PROCESS_STATE_RUNNING;
                 process_set_current(next);
-                stats.context_switches++;
+                scheduler_stats.context_switches++;
                 time_slice_remaining = TIME_SLICE_TICKS;
                 kprintf("[SCHEDULER] Context switch (timer after cleanup): destroyed -> PID %lu\n", next->pid);
             } else {
@@ -374,7 +413,7 @@ void scheduler_tick(interrupt_frame_t* frame) {
                 scheduler_restore_context(next, frame);
                 next->state = PROCESS_STATE_RUNNING;
                 process_set_current(next);
-                stats.context_switches++;
+                scheduler_stats.context_switches++;
                 time_slice_remaining = TIME_SLICE_TICKS;
                 kprintf("[SCHEDULER] Context switch (timer waiting->ready): PID %lu (WAITING) -> PID %lu\n",
                         current->pid, next->pid);
@@ -392,7 +431,7 @@ void scheduler_tick(interrupt_frame_t* frame) {
                         scheduler_restore_context(next, frame);
                         next->state = PROCESS_STATE_RUNNING;
                         process_set_current(next);
-                        stats.context_switches++;
+                        scheduler_stats.context_switches++;
                         time_slice_remaining = TIME_SLICE_TICKS;
                         return;
                     }
@@ -410,7 +449,7 @@ void scheduler_tick(interrupt_frame_t* frame) {
             next->state = PROCESS_STATE_RUNNING;
             process_set_current(next);
 
-            stats.context_switches++;
+            scheduler_stats.context_switches++;
             time_slice_remaining = TIME_SLICE_TICKS;  // Reset time slice
 
             kprintf("[SCHEDULER] Context switch (preemptive): PID %lu -> PID %lu\n",
@@ -527,15 +566,15 @@ void scheduler_restore_context(process_t* proc, void* interrupt_frame) {
 // ============================================================================
 
 scheduler_stats_t scheduler_get_stats(void) {
-    return stats;
+    return scheduler_stats;
 }
 
 void scheduler_print_stats(void) {
     kprintf("\n=== SCHEDULER STATISTICS ===\n");
-    kprintf("Context switches:  %lu\n", stats.context_switches);
-    kprintf("Preemptions:       %lu (timer-based, should be rare!)\n", stats.preemptions);
-    kprintf("Voluntary yields:  %lu (workflow-driven, primary mechanism)\n", stats.voluntary_yields);
-    kprintf("Total ticks:       %lu\n", stats.total_ticks);
+    kprintf("Context switches:  %lu\n", scheduler_stats.context_switches);
+    kprintf("Preemptions:       %lu (timer-based, should be rare!)\n", scheduler_stats.preemptions);
+    kprintf("Voluntary yields:  %lu (workflow-driven, primary mechanism)\n", scheduler_stats.voluntary_yields);
+    kprintf("Total ticks:       %lu\n", scheduler_stats.total_ticks);
     kprintf("Ready queue count: %d\n", ready_queue_count);
 
     process_t* current = process_get_current();
