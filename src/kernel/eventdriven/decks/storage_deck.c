@@ -176,8 +176,10 @@ static int fs_open(const char* path) {
         uint64_t inode_id = tagfs_create_file(tags, 2);
 
         if (inode_id != TAGFS_INVALID_INODE) {
+            // PRODUCTION: Sync to disk immediately!
+            tagfs_sync();
             int fd = allocate_fd(inode_id, path, 0);
-            kprintf("[STORAGE] Created & opened file '%s' (inode=%lu, fd=%d)\n",
+            kprintf("[STORAGE] Created & opened file '%s' (inode=%lu, fd=%d) - synced to disk\n",
                     path, inode_id, fd);
             return fd;
         } else {
@@ -248,7 +250,10 @@ static int fs_write(int fd, const void* buffer, uint64_t size) {
             fd_info->size = inode->size;
         }
 
-        kprintf("[STORAGE] Wrote %d bytes to fd=%d (inode=%lu, pos=%lu, size=%lu)\n",
+        // PRODUCTION: Sync to disk after every write!
+        tagfs_sync();
+
+        kprintf("[STORAGE] Wrote %d bytes to fd=%d (inode=%lu, pos=%lu, size=%lu) - synced to disk\n",
                 bytes_written, fd, fd_info->inode_id, fd_info->position, fd_info->size);
         return bytes_written;
     } else {
@@ -567,6 +572,8 @@ int storage_deck_process(RoutingEntry* entry) {
             // Real write
             int bytes_written = fs_write(fd, data, size);
             if (bytes_written >= 0) {
+                // PRODUCTION: Sync to disk immediately after write!
+                tagfs_sync();
                 // DEFENSIVE: Check memory allocation
                 int* result = (int*)kmalloc(sizeof(int));
                 if (!result) {
@@ -639,8 +646,10 @@ int storage_deck_process(RoutingEntry* entry) {
 
             uint64_t inode_id = tagfs_create_file(tags, tag_count);
             if (inode_id != TAGFS_INVALID_INODE) {
+                // PRODUCTION: Sync to disk immediately to ensure persistence!
+                tagfs_sync();
                 deck_complete(entry, DECK_PREFIX_STORAGE, (void*)inode_id, RESULT_TYPE_VALUE);
-                kprintf("[STORAGE] Event %lu: created file inode=%lu with %u tags\n",
+                kprintf("[STORAGE] Event %lu: created file inode=%lu with %u tags (synced to disk)\n",
                         event->id, inode_id, tag_count);
                 return 1;
             } else {
@@ -728,8 +737,10 @@ int storage_deck_process(RoutingEntry* entry) {
 
             int success = tagfs_add_tag(inode_id, tag);
             if (success) {
+                // PRODUCTION: Sync to disk after tag modification!
+                tagfs_sync();
                 deck_complete(entry, DECK_PREFIX_STORAGE, 0, RESULT_TYPE_NONE);
-                kprintf("[STORAGE] Event %lu: added tag %s:%s to inode=%lu\n",
+                kprintf("[STORAGE] Event %lu: added tag %s:%s to inode=%lu (synced to disk)\n",
                         event->id, tag->key, tag->value, inode_id);
                 return 1;
             } else {
@@ -760,8 +771,10 @@ int storage_deck_process(RoutingEntry* entry) {
 
             int success = tagfs_remove_tag(inode_id, key);
             if (success) {
+                // PRODUCTION: Sync to disk after tag modification!
+                tagfs_sync();
                 deck_complete(entry, DECK_PREFIX_STORAGE, 0, RESULT_TYPE_NONE);
-                kprintf("[STORAGE] Event %lu: removed tag '%s' from inode=%lu\n",
+                kprintf("[STORAGE] Event %lu: removed tag '%s' from inode=%lu (synced to disk)\n",
                         event->id, key, inode_id);
                 return 1;
             } else {
