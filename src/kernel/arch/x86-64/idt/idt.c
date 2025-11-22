@@ -232,11 +232,9 @@ void irq_handler(interrupt_frame_t* frame) {
             pit_tick();
 
             // ASYNC WORKFLOW PROCESSING: Process events in background
-            // Run guide every 10 ticks (100ms at 100Hz)
-            if (irq_count[0] % 10 == 0) {
-                extern void guide_process_all(void);
-                guide_process_all();
-            }
+            // Run guide EVERY tick (10ms at 100Hz) for responsive async processing
+            extern void guide_process_all(void);
+            guide_process_all();
 
             // PREEMPTIVE SCHEDULING: Call scheduler on timer tick
             // This enables hybrid scheduling (cooperative + preemptive)
@@ -411,10 +409,8 @@ void syscall_handler(interrupt_frame_t* frame) {
         kprintf("[SYSCALL] Processed %lu events from EventRing\n", processed);
 
         // Events are now in routing table.
-        // SYNCHRONOUS: Process them immediately via Guide!
-        // This ensures events are handled before WAIT is called.
-        extern void guide_process_all(void);
-        guide_process_all();
+        // ASYNC: They will be processed by guide_process_all() in timer IRQ (every tick)
+        // Process can continue execution or call WAIT to block until completion
 
         frame->rax = processed;  // Return number of events processed
         return;

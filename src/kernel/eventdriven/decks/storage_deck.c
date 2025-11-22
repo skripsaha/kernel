@@ -618,7 +618,8 @@ int storage_deck_process(RoutingEntry* entry) {
         }
 
         // === TAGFS OPERATIONS ===
-        case EVENT_FILE_CREATE_TAGGED: {
+        case 215:  // Storage Deck range: FILE_CREATE_TAGGED (new range 200-299)
+        case EVENT_FILE_CREATE_TAGGED: {  // Legacy support (old range 1-99)
             // Payload: [tag_count:4][tags:Tag[]...]
             uint32_t tag_count = *(uint32_t*)event->data;
             Tag* tags = (Tag*)(event->data + 4);

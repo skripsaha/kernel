@@ -25,8 +25,8 @@ global _start
 %define EVENT_RING_SIZE   256
 %define RESULT_RING_SIZE  256
 
-; Event types
-%define EVENT_FILE_CREATE_TAGGED 15
+; Event types (Storage Deck range: 200-299)
+%define EVENT_FILE_CREATE_TAGGED 215
 
 ; Workflow ID
 %define WORKFLOW_ID 2
