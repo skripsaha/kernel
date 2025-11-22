@@ -139,7 +139,20 @@ static int device_write(int device_id, const void* buffer, uint64_t size) {
 // ============================================================================
 
 int hardware_deck_process(RoutingEntry* entry) {
+    // DEFENSIVE: Validate input
+    if (!entry) {
+        kprintf("[HARDWARE] ERROR: NULL routing entry\n");
+        return 0;
+    }
+
     Event* event = &entry->event_copy;
+
+    // DEFENSIVE: Validate event type is in hardware range (300-399)
+    if (event->type < 300 || event->type >= 400) {
+        deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                          "Event type out of hardware range (300-399)");
+        return 0;
+    }
 
     switch (event->type) {
         // === TIMER OPERATIONS ===
@@ -147,6 +160,27 @@ int hardware_deck_process(RoutingEntry* entry) {
             // Payload: [delay_ms:8][interval_ms:8]
             uint64_t delay_ms = *(uint64_t*)event->data;
             uint64_t interval_ms = *(uint64_t*)(event->data + 8);
+
+            // DEFENSIVE: Validate delay
+            if (delay_ms == 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Timer create: delay is zero");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate reasonable delay (max 1 hour)
+            if (delay_ms > 3600000) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Timer create: delay exceeds 1 hour");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate interval (max 1 hour)
+            if (interval_ms > 3600000) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Timer create: interval exceeds 1 hour");
+                return 0;
+            }
 
             Timer* timer = timer_create(delay_ms, interval_ms, NULL);  // NULL = not suspended
 
@@ -156,25 +190,50 @@ int hardware_deck_process(RoutingEntry* entry) {
                         event->id, timer->id);
                 return 1;
             }
-            deck_error(entry, DECK_PREFIX_HARDWARE, 1);
+            deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_HW_TIMER_SLOTS_FULL,
+                              "Timer create: no free timer slots");
             return 0;
         }
 
         case EVENT_TIMER_CANCEL: {
+            // DEFENSIVE: Validate timer ID
             uint64_t timer_id = *(uint64_t*)event->data;
+
+            if (timer_id == 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Timer cancel: timer ID is zero");
+                return 0;
+            }
+
             int success = timer_cancel(timer_id);
             if (success) {
                 deck_complete(entry, DECK_PREFIX_HARDWARE, 0, RESULT_TYPE_NONE);
+                kprintf("[HARDWARE] Event %lu: cancelled timer %lu\n",
+                        event->id, timer_id);
+                return 1;
             } else {
-                deck_error(entry, DECK_PREFIX_HARDWARE, 2);
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_HW_TIMER_NOT_FOUND,
+                                  "Timer cancel: timer not found");
+                return 0;
             }
-            kprintf("[HARDWARE] Event %lu: cancelled timer %lu (status=%d)\n",
-                    event->id, timer_id, success);
-            return success;
         }
 
         case EVENT_TIMER_SLEEP: {
             uint64_t ms = *(uint64_t*)event->data;
+
+            // DEFENSIVE: Validate sleep duration
+            if (ms == 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Timer sleep: duration is zero");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate reasonable duration (max 1 hour)
+            if (ms > 3600000) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Timer sleep: duration exceeds 1 hour");
+                return 0;
+            }
 
             // Create one-shot timer linked to this entry (workflow suspension)
             Timer* timer = timer_create(ms, 0, entry);  // 0 interval = one-shot
@@ -191,7 +250,8 @@ int hardware_deck_process(RoutingEntry* entry) {
             }
 
             // Failed to create timer - fall back to error
-            deck_error(entry, DECK_PREFIX_HARDWARE, 1);
+            deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_HW_TIMER_SLOTS_FULL,
+                              "Timer sleep: no free timer slots");
             return 0;
         }
 
@@ -204,7 +264,25 @@ int hardware_deck_process(RoutingEntry* entry) {
 
         // === DEVICE OPERATIONS (STUBS) ===
         case EVENT_DEV_OPEN: {
+            // DEFENSIVE: Validate device name
             const char* name = (const char*)event->data;
+
+            if (!name || name[0] == 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device open: name is NULL or empty");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate name length
+            uint64_t name_len = 0;
+            while (name[name_len] && name_len < 64) name_len++;
+
+            if (name_len >= 64) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device open: name exceeds 64 characters");
+                return 0;
+            }
+
             int device_id = device_open(name);
             deck_complete(entry, DECK_PREFIX_HARDWARE, (void*)(uint64_t)device_id, RESULT_TYPE_VALUE);
             kprintf("[HARDWARE] Event %lu: device open '%s'\n", event->id, name);
@@ -216,6 +294,14 @@ int hardware_deck_process(RoutingEntry* entry) {
             int device_id = *(int*)event->data;
             uint64_t command = *(uint64_t*)(event->data + 4);
             void* arg = event->data + 12;
+
+            // DEFENSIVE: Validate device ID
+            if (device_id < 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device ioctl: invalid device ID");
+                return 0;
+            }
+
             device_ioctl(device_id, command, arg);
             deck_complete(entry, DECK_PREFIX_HARDWARE, 0, RESULT_TYPE_NONE);
             kprintf("[HARDWARE] Event %lu: device ioctl\n", event->id);
@@ -226,6 +312,28 @@ int hardware_deck_process(RoutingEntry* entry) {
             // Payload: [device_id:4][size:8]
             int device_id = *(int*)event->data;
             uint64_t size = *(uint64_t*)(event->data + 4);
+
+            // DEFENSIVE: Validate device ID
+            if (device_id < 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device read: invalid device ID");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate size
+            if (size == 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device read: size is zero");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate reasonable size (max 1MB)
+            if (size > 1024 * 1024) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device read: size exceeds 1MB limit");
+                return 0;
+            }
+
             device_read(device_id, 0, size);
             deck_complete(entry, DECK_PREFIX_HARDWARE, 0, RESULT_TYPE_NONE);
             kprintf("[HARDWARE] Event %lu: device read\n", event->id);
@@ -237,6 +345,28 @@ int hardware_deck_process(RoutingEntry* entry) {
             int device_id = *(int*)event->data;
             uint64_t size = *(uint64_t*)(event->data + 4);
             void* data = event->data + 12;
+
+            // DEFENSIVE: Validate device ID
+            if (device_id < 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device write: invalid device ID");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate size
+            if (size == 0) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device write: size is zero");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate size fits in event payload
+            if (size > EVENT_DATA_SIZE - 12) {
+                deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_INVALID_PARAMETER,
+                                  "Device write: data exceeds event payload limit");
+                return 0;
+            }
+
             device_write(device_id, data, size);
             deck_complete(entry, DECK_PREFIX_HARDWARE, 0, RESULT_TYPE_NONE);
             kprintf("[HARDWARE] Event %lu: device write\n", event->id);
@@ -244,8 +374,10 @@ int hardware_deck_process(RoutingEntry* entry) {
         }
 
         default:
-            kprintf("[HARDWARE] Unknown event type %d\n", event->type);
-            deck_error(entry, DECK_PREFIX_HARDWARE, 3);
+            // PRODUCTION: Detailed error for unknown operations
+            kprintf("[HARDWARE] ERROR: Unknown/unimplemented event type %d\n", event->type);
+            deck_error_detailed(entry, DECK_PREFIX_HARDWARE, ERROR_NOT_IMPLEMENTED,
+                              "Hardware operation type not implemented");
             return 0;
     }
 }
