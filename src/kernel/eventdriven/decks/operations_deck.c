@@ -174,7 +174,20 @@ static void vector_scale(const uint64_t* input, uint64_t scalar, uint64_t* outpu
 #define EVENT_OP_VECTOR_SCALE   132
 
 int operations_deck_process(RoutingEntry* entry) {
+    // DEFENSIVE: Validate input
+    if (!entry) {
+        kprintf("[OPERATIONS] ERROR: NULL routing entry\n");
+        return 0;
+    }
+
     Event* event = &entry->event_copy;
+
+    // DEFENSIVE: Validate event type is in operations range (100-199)
+    if (event->type < 100 || event->type >= 200) {
+        deck_error_detailed(entry, DECK_PREFIX_OPERATIONS, ERROR_OP_INVALID_OPERATION,
+                          "Event type out of operations range (100-199)");
+        return 0;
+    }
 
     switch (event->type) {
         // ====================================================================
@@ -183,17 +196,35 @@ int operations_deck_process(RoutingEntry* entry) {
 
         case EVENT_OP_HASH_CRC32: {
             // Payload: [size:8][data:...]
+
+            // DEFENSIVE: Validate payload has at least size field
             uint64_t size = *(uint64_t*)event->data;
             const uint8_t* data = event->data + 8;
 
+            // DEFENSIVE: Validate data size is non-zero
+            if (size == 0) {
+                deck_error_detailed(entry, DECK_PREFIX_OPERATIONS, ERROR_OP_INVALID_INPUT,
+                                  "CRC32: data size is zero");
+                return 0;
+            }
+
+            // DEFENSIVE: Validate data size fits in event payload
             if (size > EVENT_DATA_SIZE - 8) {
-                deck_error(entry, DECK_PREFIX_OPERATIONS, 1);
+                deck_error_detailed(entry, DECK_PREFIX_OPERATIONS, ERROR_OP_INVALID_INPUT,
+                                  "CRC32: data size exceeds event payload limit");
                 return 0;
             }
 
             uint32_t hash = crc32_compute(data, size);
 
+            // DEFENSIVE: Check memory allocation success
             uint32_t* result = (uint32_t*)kmalloc(sizeof(uint32_t));
+            if (!result) {
+                deck_error_detailed(entry, DECK_PREFIX_OPERATIONS, ERROR_OUT_OF_MEMORY,
+                                  "CRC32: failed to allocate result buffer");
+                return 0;
+            }
+
             *result = hash;
 
             deck_complete(entry, DECK_PREFIX_OPERATIONS, result, RESULT_TYPE_KMALLOC);
@@ -393,8 +424,10 @@ int operations_deck_process(RoutingEntry* entry) {
         }
 
         default:
-            kprintf("[OPERATIONS] Unknown event type %d\n", event->type);
-            deck_error(entry, DECK_PREFIX_OPERATIONS, 99);
+            // PRODUCTION: Detailed error for unknown operations
+            kprintf("[OPERATIONS] ERROR: Unknown/unimplemented event type %d\n", event->type);
+            deck_error_detailed(entry, DECK_PREFIX_OPERATIONS, ERROR_NOT_IMPLEMENTED,
+                              "Operation type not implemented");
             return 0;
     }
 }
