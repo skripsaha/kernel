@@ -63,6 +63,7 @@ typedef struct {
     // Statistics
     uint64_t syscall_count;         // Number of syscalls made
     uint64_t creation_time;         // RDTSC at creation
+    int exit_code;                  // Exit code (when ZOMBIE)
 
 } process_t;
 
